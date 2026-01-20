@@ -24,10 +24,19 @@ loom {
 	mods {
 		"stats-command" {
 			sourceSet sourceSets.main
-			sourceSet sourceSets.client
 		}
 	}
+}
 
+sourceSets {
+	main {
+		java {
+			srcDirs = ['src/java']
+		}
+		resources {
+			srcDirs = ['src/resources']
+		}
+	}
 }
 
 dependencies {
