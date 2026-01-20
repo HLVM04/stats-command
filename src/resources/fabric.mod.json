@@ -1,0 +1,29 @@
+{
+	"schemaVersion": 1,
+	"id": "stats-command",
+	"version": "${version}",
+	"name": "Stats Command",
+	"description": "View stats and leaderboards with one command",
+	"authors": [
+		"HLVM"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/HLVM04/stats-command"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/stats-command/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"hlvm.stats.StatsCommand"
+		]
+	},
+	"mixins": [],
+	"depends": {
+		"fabricloader": ">=0.18.4",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
