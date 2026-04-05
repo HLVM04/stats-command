@@ -9,32 +9,31 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
-import net.minecraft.block.Block;
-import net.minecraft.command.argument.GameProfileArgumentType;
-import net.minecraft.command.argument.IdentifierArgumentType;
-import net.minecraft.command.argument.RegistryEntryReferenceArgumentType;
-import net.minecraft.entity.EntityType;
-import net.minecraft.item.Item;
-import net.minecraft.registry.Registries;
-import net.minecraft.registry.RegistryKeys;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.commands.arguments.GameProfileArgument;
+import net.minecraft.commands.arguments.IdentifierArgument;
+import net.minecraft.commands.arguments.ResourceArgument;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.item.Item;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.command.ServerCommandSource;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.stat.Stat;
-import net.minecraft.stat.StatHandler;
-import net.minecraft.stat.StatType;
-import net.minecraft.stat.Stats;
-import net.minecraft.text.Text;
-import net.minecraft.util.Identifier;
-import net.minecraft.text.ClickEvent;
-import net.minecraft.text.HoverEvent;
-import net.minecraft.text.Style;
-import net.minecraft.util.Formatting;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.stats.Stat;
+import net.minecraft.stats.StatsCounter;
+import net.minecraft.stats.StatType;
+import net.minecraft.stats.Stats;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.ClickEvent;
+import net.minecraft.network.chat.HoverEvent;
+import net.minecraft.resources.Identifier;
+import net.minecraft.ChatFormatting;
 
 import java.util.*;
 import java.util.Set;
 
-import static net.minecraft.server.command.CommandManager.*;
+import static net.minecraft.commands.Commands.*;
 
 /**
  * Stats Command Mod - Provides player statistics lookup and leaderboards.
@@ -92,13 +91,13 @@ public class StatsCommand implements ModInitializer {
 			if (statsIndex == null)
 				return;
 
-			ServerPlayerEntity player = handler.getPlayer();
-			statsIndex.cachePlayerName(player.getUuid(), player.getName().getString());
+			ServerPlayer player = handler.getPlayer();
+			statsIndex.cachePlayerName(player.getUUID(), player.getName().getString());
 
-			int playerId = statsIndex.getOrCreatePlayerId(player.getUuid());
-			StatHandler statHandler = player.getStatHandler();
+			int playerId = statsIndex.getOrCreatePlayerId(player.getUUID());
+			StatsCounter statHandler = player.getStats();
 
-			for (StatType<?> statType : Registries.STAT_TYPE) {
+			for (StatType<?> statType : BuiltInRegistries.STAT_TYPE) {
 				persistStats(statType, statHandler, playerId);
 			}
 		});
@@ -106,49 +105,45 @@ public class StatsCommand implements ModInitializer {
 
 	private void registerCommands() {
 		CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, env) -> {
-			LiteralArgumentBuilder<ServerCommandSource> statsCmd = literal("stats")
+			LiteralArgumentBuilder<CommandSourceStack> statsCmd = literal("stats")
 					.executes(ctx -> showHelp(ctx))
 					.then(literal("help").executes(ctx -> showHelp(ctx)));
 
 			// Player stats lookup
-			var playerArg = argument("target", GameProfileArgumentType.gameProfile());
+			var playerArg = argument("target", GameProfileArgument.gameProfile());
 
 			// Block stats
 			playerArg.then(literal("mined")
 					.then(argument("block",
-							RegistryEntryReferenceArgumentType.registryEntry(registryAccess, RegistryKeys.BLOCK))
-							.executes(ctx -> executeStat(ctx, Stats.MINED,
-									RegistryEntryReferenceArgumentType
-											.getRegistryEntry(ctx, "block", RegistryKeys.BLOCK).value(),
+							ResourceArgument.resource(registryAccess, Registries.BLOCK))
+							.executes(ctx -> executeStat(ctx, Stats.BLOCK_MINED,
+									ResourceArgument
+											.getResource(ctx, "block", Registries.BLOCK).value(),
 									"mined", false))
 							.then(argument("share", BoolArgumentType.bool())
-									.suggests((ctx, builder) -> builder.buildFuture())
-									.executes(ctx -> executeStat(ctx,
-											Stats.MINED,
-											RegistryEntryReferenceArgumentType
-													.getRegistryEntry(ctx, "block", RegistryKeys.BLOCK).value(),
+									.executes(ctx -> executeStat(ctx, Stats.BLOCK_MINED,
+											ResourceArgument
+													.getResource(ctx, "block", Registries.BLOCK).value(),
 											"mined", BoolArgumentType.getBool(ctx, "share"))))));
 
 			// Item stats
 			for (var entry : List.of(
-					Map.entry("used", Stats.USED),
-					Map.entry("crafted", Stats.CRAFTED),
-					Map.entry("broken", Stats.BROKEN),
-					Map.entry("picked_up", Stats.PICKED_UP),
-					Map.entry("dropped", Stats.DROPPED))) {
+					Map.entry("used", Stats.ITEM_USED),
+					Map.entry("crafted", Stats.ITEM_CRAFTED),
+					Map.entry("broken", Stats.ITEM_BROKEN),
+					Map.entry("picked_up", Stats.ITEM_PICKED_UP),
+					Map.entry("dropped", Stats.ITEM_DROPPED))) {
 				playerArg.then(literal(entry.getKey())
 						.then(argument("item",
-								RegistryEntryReferenceArgumentType.registryEntry(registryAccess, RegistryKeys.ITEM))
+								ResourceArgument.resource(registryAccess, Registries.ITEM))
 								.executes(ctx -> executeStat(ctx, entry.getValue(),
-										RegistryEntryReferenceArgumentType
-												.getRegistryEntry(ctx, "item", RegistryKeys.ITEM).value(),
+										ResourceArgument
+												.getResource(ctx, "item", Registries.ITEM).value(),
 										entry.getKey().replace("_", " "), false))
 								.then(argument("share", BoolArgumentType.bool())
-										.suggests((ctx, builder) -> builder.buildFuture())
-										.executes(ctx -> executeStat(ctx,
-												entry.getValue(),
-												RegistryEntryReferenceArgumentType
-														.getRegistryEntry(ctx, "item", RegistryKeys.ITEM).value(),
+										.executes(ctx -> executeStat(ctx, entry.getValue(),
+												ResourceArgument
+														.getResource(ctx, "item", Registries.ITEM).value(),
 												entry.getKey().replace("_", " "),
 												BoolArgumentType.getBool(ctx, "share"))))));
 			}
@@ -156,36 +151,32 @@ public class StatsCommand implements ModInitializer {
 			// Entity stats
 			playerArg.then(literal("killed")
 					.then(argument("entity",
-							RegistryEntryReferenceArgumentType.registryEntry(registryAccess, RegistryKeys.ENTITY_TYPE))
-							.executes(ctx -> executeStat(ctx, Stats.KILLED,
-									RegistryEntryReferenceArgumentType
-											.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+							ResourceArgument.resource(registryAccess, Registries.ENTITY_TYPE))
+							.executes(ctx -> executeStat(ctx, Stats.ENTITY_KILLED,
+									ResourceArgument
+											.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 									"killed", false))
 							.then(argument("share", BoolArgumentType.bool())
-									.suggests((ctx, builder) -> builder.buildFuture())
-									.executes(ctx -> executeStat(ctx,
-											Stats.KILLED,
-											RegistryEntryReferenceArgumentType
-													.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+									.executes(ctx -> executeStat(ctx, Stats.ENTITY_KILLED,
+											ResourceArgument
+													.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 											"killed", BoolArgumentType.getBool(ctx, "share"))))));
 
 			playerArg.then(literal("killed_by")
 					.then(argument("entity",
-							RegistryEntryReferenceArgumentType.registryEntry(registryAccess, RegistryKeys.ENTITY_TYPE))
-							.executes(ctx -> executeStat(ctx, Stats.KILLED_BY,
-									RegistryEntryReferenceArgumentType
-											.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+							ResourceArgument.resource(registryAccess, Registries.ENTITY_TYPE))
+							.executes(ctx -> executeStat(ctx, Stats.ENTITY_KILLED_BY,
+									ResourceArgument
+											.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 									"killed by", false))
 							.then(argument("share", BoolArgumentType.bool())
-									.suggests((ctx, builder) -> builder.buildFuture())
-									.executes(ctx -> executeStat(ctx,
-											Stats.KILLED_BY,
-											RegistryEntryReferenceArgumentType
-													.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+									.executes(ctx -> executeStat(ctx, Stats.ENTITY_KILLED_BY,
+											ResourceArgument
+													.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 											"killed by", BoolArgumentType.getBool(ctx, "share"))))));
 
 			// Custom stats
-			SuggestionProvider<ServerCommandSource> customStatSuggestions = (ctx, builder) -> {
+			SuggestionProvider<CommandSourceStack> customStatSuggestions = (ctx, builder) -> {
 				for (Identifier id : Stats.CUSTOM.getRegistry()) {
 					builder.suggest(id.toString());
 				}
@@ -193,15 +184,13 @@ public class StatsCommand implements ModInitializer {
 			};
 
 			playerArg.then(literal("custom")
-					.then(argument("stat", IdentifierArgumentType.identifier())
+					.then(argument("stat", IdentifierArgument.id())
 							.suggests(customStatSuggestions)
-							.suggests(customStatSuggestions)
-							.executes(ctx -> executeCustomStat(ctx, IdentifierArgumentType.getIdentifier(ctx, "stat"),
-									false))
+							.executes(
+									ctx -> executeCustomStat(ctx, IdentifierArgument.getId(ctx, "stat"), false))
 							.then(argument("share", BoolArgumentType.bool())
-									.suggests((ctx, builder) -> builder.buildFuture())
 									.executes(ctx -> executeCustomStat(ctx,
-											IdentifierArgumentType.getIdentifier(ctx, "stat"),
+											IdentifierArgument.getId(ctx, "stat"),
 											BoolArgumentType.getBool(ctx, "share"))))));
 
 			statsCmd.then(playerArg);
@@ -212,63 +201,58 @@ public class StatsCommand implements ModInitializer {
 			// Top mined
 			topCmd.then(literal("mined")
 					.then(argument("block",
-							RegistryEntryReferenceArgumentType.registryEntry(registryAccess, RegistryKeys.BLOCK))
-							.executes(ctx -> executeTop(ctx, Stats.MINED,
-									RegistryEntryReferenceArgumentType
-											.getRegistryEntry(ctx, "block", RegistryKeys.BLOCK).value(),
+							ResourceArgument.resource(registryAccess, Registries.BLOCK))
+							.executes(ctx -> executeTop(ctx, Stats.BLOCK_MINED,
+									ResourceArgument
+											.getResource(ctx, "block", Registries.BLOCK).value(),
 									"mined", 1, false))
 							.then(argument("share", BoolArgumentType.bool())
-									.suggests((ctx, builder) -> builder.buildFuture())
-									.executes(ctx -> executeTop(ctx, Stats.MINED,
-											RegistryEntryReferenceArgumentType
-													.getRegistryEntry(ctx, "block", RegistryKeys.BLOCK).value(),
+									.executes(ctx -> executeTop(ctx, Stats.BLOCK_MINED,
+											ResourceArgument
+													.getResource(ctx, "block", Registries.BLOCK).value(),
 											"mined", 1, BoolArgumentType.getBool(ctx, "share"))))
 							.then(argument("page", IntegerArgumentType.integer(1))
-									.executes(ctx -> executeTop(ctx, Stats.MINED,
-											RegistryEntryReferenceArgumentType
-													.getRegistryEntry(ctx, "block", RegistryKeys.BLOCK).value(),
+									.executes(ctx -> executeTop(ctx, Stats.BLOCK_MINED,
+											ResourceArgument
+													.getResource(ctx, "block", Registries.BLOCK).value(),
 											"mined", IntegerArgumentType.getInteger(ctx, "page"), false))
 									.then(argument("share", BoolArgumentType.bool())
-											.suggests((ctx, builder) -> builder.buildFuture())
-											.executes(ctx -> executeTop(ctx, Stats.MINED,
-													RegistryEntryReferenceArgumentType
-															.getRegistryEntry(ctx, "block", RegistryKeys.BLOCK).value(),
+											.executes(ctx -> executeTop(ctx, Stats.BLOCK_MINED,
+													ResourceArgument
+															.getResource(ctx, "block", Registries.BLOCK).value(),
 													"mined", IntegerArgumentType.getInteger(ctx, "page"),
 													BoolArgumentType.getBool(ctx, "share")))))));
 
 			// Top item stats
 			for (var entry : List.of(
-					Map.entry("used", Stats.USED),
-					Map.entry("crafted", Stats.CRAFTED),
-					Map.entry("broken", Stats.BROKEN),
-					Map.entry("picked_up", Stats.PICKED_UP),
-					Map.entry("dropped", Stats.DROPPED))) {
+					Map.entry("used", Stats.ITEM_USED),
+					Map.entry("crafted", Stats.ITEM_CRAFTED),
+					Map.entry("broken", Stats.ITEM_BROKEN),
+					Map.entry("picked_up", Stats.ITEM_PICKED_UP),
+					Map.entry("dropped", Stats.ITEM_DROPPED))) {
 				topCmd.then(literal(entry.getKey())
 						.then(argument("item",
-								RegistryEntryReferenceArgumentType.registryEntry(registryAccess, RegistryKeys.ITEM))
+								ResourceArgument.resource(registryAccess, Registries.ITEM))
 								.executes(ctx -> executeTop(ctx, entry.getValue(),
-										RegistryEntryReferenceArgumentType
-												.getRegistryEntry(ctx, "item", RegistryKeys.ITEM).value(),
+										ResourceArgument
+												.getResource(ctx, "item", Registries.ITEM).value(),
 										entry.getKey().replace("_", " "), 1, false))
 								.then(argument("share", BoolArgumentType.bool())
-										.suggests((ctx, builder) -> builder.buildFuture())
 										.executes(ctx -> executeTop(ctx, entry.getValue(),
-												RegistryEntryReferenceArgumentType
-														.getRegistryEntry(ctx, "item", RegistryKeys.ITEM).value(),
+												ResourceArgument
+														.getResource(ctx, "item", Registries.ITEM).value(),
 												entry.getKey().replace("_", " "), 1,
 												BoolArgumentType.getBool(ctx, "share"))))
 								.then(argument("page", IntegerArgumentType.integer(1))
 										.executes(ctx -> executeTop(ctx, entry.getValue(),
-												RegistryEntryReferenceArgumentType
-														.getRegistryEntry(ctx, "item", RegistryKeys.ITEM).value(),
+												ResourceArgument
+														.getResource(ctx, "item", Registries.ITEM).value(),
 												entry.getKey().replace("_", " "),
 												IntegerArgumentType.getInteger(ctx, "page"), false))
 										.then(argument("share", BoolArgumentType.bool())
-												.suggests((ctx, builder) -> builder.buildFuture())
 												.executes(ctx -> executeTop(ctx, entry.getValue(),
-														RegistryEntryReferenceArgumentType
-																.getRegistryEntry(ctx, "item", RegistryKeys.ITEM)
-																.value(),
+														ResourceArgument
+																.getResource(ctx, "item", Registries.ITEM).value(),
 														entry.getKey().replace("_", " "),
 														IntegerArgumentType.getInteger(ctx, "page"),
 														BoolArgumentType.getBool(ctx, "share")))))));
@@ -277,78 +261,70 @@ public class StatsCommand implements ModInitializer {
 			// Top entity stats
 			topCmd.then(literal("killed")
 					.then(argument("entity",
-							RegistryEntryReferenceArgumentType.registryEntry(registryAccess, RegistryKeys.ENTITY_TYPE))
-							.executes(ctx -> executeTop(ctx, Stats.KILLED,
-									RegistryEntryReferenceArgumentType
-											.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+							ResourceArgument.resource(registryAccess, Registries.ENTITY_TYPE))
+							.executes(ctx -> executeTop(ctx, Stats.ENTITY_KILLED,
+									ResourceArgument
+											.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 									"killed", 1, false))
 							.then(argument("share", BoolArgumentType.bool())
-									.suggests((ctx, builder) -> builder.buildFuture())
-									.executes(ctx -> executeTop(ctx, Stats.KILLED,
-											RegistryEntryReferenceArgumentType
-													.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+									.executes(ctx -> executeTop(ctx, Stats.ENTITY_KILLED,
+											ResourceArgument
+													.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 											"killed", 1, BoolArgumentType.getBool(ctx, "share"))))
 							.then(argument("page", IntegerArgumentType.integer(1))
-									.executes(ctx -> executeTop(ctx, Stats.KILLED,
-											RegistryEntryReferenceArgumentType
-													.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+									.executes(ctx -> executeTop(ctx, Stats.ENTITY_KILLED,
+											ResourceArgument
+													.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 											"killed", IntegerArgumentType.getInteger(ctx, "page"), false))
 									.then(argument("share", BoolArgumentType.bool())
-											.suggests((ctx, builder) -> builder.buildFuture())
-											.executes(ctx -> executeTop(ctx, Stats.KILLED,
-													RegistryEntryReferenceArgumentType
-															.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE)
-															.value(),
+											.executes(ctx -> executeTop(ctx, Stats.ENTITY_KILLED,
+													ResourceArgument
+															.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 													"killed", IntegerArgumentType.getInteger(ctx, "page"),
 													BoolArgumentType.getBool(ctx, "share")))))));
 
 			topCmd.then(literal("killed_by")
 					.then(argument("entity",
-							RegistryEntryReferenceArgumentType.registryEntry(registryAccess, RegistryKeys.ENTITY_TYPE))
-							.executes(ctx -> executeTop(ctx, Stats.KILLED_BY,
-									RegistryEntryReferenceArgumentType
-											.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+							ResourceArgument.resource(registryAccess, Registries.ENTITY_TYPE))
+							.executes(ctx -> executeTop(ctx, Stats.ENTITY_KILLED_BY,
+									ResourceArgument
+											.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 									"killed by", 1, false))
 							.then(argument("share", BoolArgumentType.bool())
-									.suggests((ctx, builder) -> builder.buildFuture())
-									.executes(ctx -> executeTop(ctx, Stats.KILLED_BY,
-											RegistryEntryReferenceArgumentType
-													.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+									.executes(ctx -> executeTop(ctx, Stats.ENTITY_KILLED_BY,
+											ResourceArgument
+													.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 											"killed by", 1, BoolArgumentType.getBool(ctx, "share"))))
 							.then(argument("page", IntegerArgumentType.integer(1))
-									.executes(ctx -> executeTop(ctx, Stats.KILLED_BY,
-											RegistryEntryReferenceArgumentType
-													.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE).value(),
+									.executes(ctx -> executeTop(ctx, Stats.ENTITY_KILLED_BY,
+											ResourceArgument
+													.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 											"killed by", IntegerArgumentType.getInteger(ctx, "page"), false))
 									.then(argument("share", BoolArgumentType.bool())
-											.suggests((ctx, builder) -> builder.buildFuture())
-											.executes(ctx -> executeTop(ctx, Stats.KILLED_BY,
-													RegistryEntryReferenceArgumentType
-															.getRegistryEntry(ctx, "entity", RegistryKeys.ENTITY_TYPE)
-															.value(),
+											.executes(ctx -> executeTop(ctx, Stats.ENTITY_KILLED_BY,
+													ResourceArgument
+															.getResource(ctx, "entity", Registries.ENTITY_TYPE).value(),
 													"killed by", IntegerArgumentType.getInteger(ctx, "page"),
 													BoolArgumentType.getBool(ctx, "share")))))));
 
 			// Top custom stats
 			topCmd.then(literal("custom")
-					.then(argument("stat", IdentifierArgumentType.identifier())
+					.then(argument("stat", IdentifierArgument.id())
 							.suggests(customStatSuggestions)
 							.executes(
-									ctx -> executeCustomTop(ctx, IdentifierArgumentType.getIdentifier(ctx, "stat"), 1,
-											false))
+									ctx -> executeCustomTop(ctx, IdentifierArgument.getId(ctx, "stat"), 1, false))
 							.then(argument("share", BoolArgumentType.bool())
-									.suggests((ctx, builder) -> builder.buildFuture())
 									.executes(ctx -> executeCustomTop(ctx,
-											IdentifierArgumentType.getIdentifier(ctx, "stat"), 1,
+											IdentifierArgument.getId(ctx, "stat"),
+											1,
 											BoolArgumentType.getBool(ctx, "share"))))
 							.then(argument("page", IntegerArgumentType.integer(1))
 									.executes(ctx -> executeCustomTop(ctx,
-											IdentifierArgumentType.getIdentifier(ctx, "stat"),
+											IdentifierArgument.getId(ctx, "stat"),
 											IntegerArgumentType.getInteger(ctx, "page"), false))
 									.then(argument("share", BoolArgumentType.bool())
-											.suggests((ctx, builder) -> builder.buildFuture())
 											.executes(ctx -> executeCustomTop(ctx,
-													IdentifierArgumentType.getIdentifier(ctx, "stat"),
+													IdentifierArgument.getId(ctx, "stat"),
 													IntegerArgumentType.getInteger(ctx, "page"),
 													BoolArgumentType.getBool(ctx, "share")))))));
 
@@ -362,29 +338,29 @@ public class StatsCommand implements ModInitializer {
 	/**
 	 * Displays a concise help message for the /stats command.
 	 */
-	private int showHelp(CommandContext<ServerCommandSource> ctx) {
-		ctx.getSource().sendFeedback(() -> Text.literal("§6--- Stats Command ---"), false);
-		ctx.getSource().sendFeedback(
-				() -> Text.literal("§e/stats <player> <category> <item>§r - Look up a player's stat"), false);
-		ctx.getSource().sendFeedback(() -> Text.literal("§e/stats top <category> <item> [page]§r - View leaderboard"),
+	private int showHelp(CommandContext<CommandSourceStack> ctx) {
+		ctx.getSource().sendSuccess(() -> Component.literal("§6--- Stats Command ---"), false);
+		ctx.getSource().sendSuccess(
+				() -> Component.literal("§e/stats <player> <category> <item>§r - Look up a player's stat"), false);
+		ctx.getSource().sendSuccess(() -> Component.literal("§e/stats top <category> <item> [page]§r - View leaderboard"),
 				false);
 		ctx.getSource()
-				.sendFeedback(() -> Text.literal(
+				.sendSuccess(() -> Component.literal(
 						"§7Categories:§r mined, used, crafted, broken, picked_up, dropped, killed, killed_by, custom"),
 						false);
-		ctx.getSource().sendFeedback(() -> Text.literal("§7Examples:§r"), false);
-		ctx.getSource().sendFeedback(() -> Text.literal("  /stats Steve mined minecraft:diamond_ore"), false);
-		ctx.getSource().sendFeedback(() -> Text.literal("  /stats top custom minecraft:play_time"), false);
+		ctx.getSource().sendSuccess(() -> Component.literal("§7Examples:§r"), false);
+		ctx.getSource().sendSuccess(() -> Component.literal("  /stats Steve mined minecraft:diamond_ore"), false);
+		ctx.getSource().sendSuccess(() -> Component.literal("  /stats top custom minecraft:play_time"), false);
 		return 1;
 	}
 
 	/**
 	 * Executes a stat lookup for standard stat types (blocks, items, entities).
 	 */
-	private <T> int executeStat(CommandContext<ServerCommandSource> ctx, StatType<T> type, T key, String verb,
+	private <T> int executeStat(CommandContext<CommandSourceStack> ctx, StatType<T> type, T key, String verb,
 			boolean share) {
 		try {
-			var profiles = GameProfileArgumentType.getProfileArgument(ctx, "target");
+			var profiles = GameProfileArgument.getGameProfiles(ctx, "target");
 			if (profiles.isEmpty()) {
 				sendError(ctx, "Player not found.");
 				return 0;
@@ -392,11 +368,11 @@ public class StatsCommand implements ModInitializer {
 			var profile = profiles.iterator().next();
 
 			MinecraftServer server = ctx.getSource().getServer();
-			ServerPlayerEntity onlinePlayer = server.getPlayerManager().getPlayer(profile.id());
+			ServerPlayer onlinePlayer = server.getPlayerList().getPlayer(profile.id());
 
 			int value;
 			if (onlinePlayer != null) {
-				value = onlinePlayer.getStatHandler().getStat(type.getOrCreateStat(key));
+				value = onlinePlayer.getStats().getValue(type.get(key));
 			} else {
 				if (statsIndex == null) {
 					sendError(ctx, "Index not loaded yet.");
@@ -407,13 +383,11 @@ public class StatsCommand implements ModInitializer {
 			}
 
 			String message = formatStatMessage(profile.name(), verb, value, getReadableName(key), type);
-
 			if (share) {
-				broadcastAsPlayer(ctx, Text.literal(message));
+				broadcastAsPlayer(ctx, Component.literal(message));
 			} else {
 				sendWithShareButton(ctx, message);
 			}
-
 			return 1;
 		} catch (Exception e) {
 			sendError(ctx, e.getMessage());
@@ -425,7 +399,7 @@ public class StatsCommand implements ModInitializer {
 	 * Executes a stat lookup for custom stats.
 	 * Custom stats require special handling to get the exact registered Identifier.
 	 */
-	private int executeCustomStat(CommandContext<ServerCommandSource> ctx, Identifier statId, boolean share) {
+	private int executeCustomStat(CommandContext<CommandSourceStack> ctx, Identifier statId, boolean share) {
 		try {
 			Identifier registeredId = findRegisteredCustomStat(statId);
 			if (registeredId == null) {
@@ -433,7 +407,7 @@ public class StatsCommand implements ModInitializer {
 				return 0;
 			}
 
-			var profiles = GameProfileArgumentType.getProfileArgument(ctx, "target");
+			var profiles = GameProfileArgument.getGameProfiles(ctx, "target");
 			if (profiles.isEmpty()) {
 				sendError(ctx, "Player not found.");
 				return 0;
@@ -441,24 +415,24 @@ public class StatsCommand implements ModInitializer {
 			var profile = profiles.iterator().next();
 
 			MinecraftServer server = ctx.getSource().getServer();
-			ServerPlayerEntity onlinePlayer = server.getPlayerManager().getPlayer(profile.id());
+			ServerPlayer onlinePlayer = server.getPlayerList().getPlayer(profile.id());
 
 			int value;
 			if (onlinePlayer != null) {
-				value = onlinePlayer.getStatHandler().getStat(Stats.CUSTOM.getOrCreateStat(registeredId));
+				value = onlinePlayer.getStats().getValue(Stats.CUSTOM.get(registeredId));
 			} else {
 				if (statsIndex == null) {
 					sendError(ctx, "Index not loaded yet.");
 					return 0;
 				}
-				value = statsIndex.getPlayerStat(profile.id(), "minecraft:custom/" + statId);
+				value = statsIndex.getPlayerStat(profile.id(), "minecraft:custom/" + registeredId);
 			}
 
 			String readableName = getCustomStatReadableName(statId);
 			String formattedValue = formatCustomStatValue(statId.getPath(), value);
 			String message = String.format("%s: §a%s§r %s", profile.name(), formattedValue, readableName);
 			if (share) {
-				broadcastAsPlayer(ctx, Text.literal(message));
+				broadcastAsPlayer(ctx, Component.literal(message));
 			} else {
 				sendWithShareButton(ctx, message);
 			}
@@ -472,7 +446,7 @@ public class StatsCommand implements ModInitializer {
 	/**
 	 * Executes a leaderboard lookup for standard stat types.
 	 */
-	private <T> int executeTop(CommandContext<ServerCommandSource> ctx, StatType<T> type, T key, String verb,
+	private <T> int executeTop(CommandContext<CommandSourceStack> ctx, StatType<T> type, T key, String verb,
 			int page, boolean share) {
 		if (statsIndex == null) {
 			sendError(ctx, "Index not loaded yet.");
@@ -481,7 +455,7 @@ public class StatsCommand implements ModInitializer {
 
 		MinecraftServer server = ctx.getSource().getServer();
 		String statKey = getStatTypeId(type) + "/" + getStatKeyString(key);
-		Stat<T> stat = type.getOrCreateStat(key);
+		Stat<T> stat = type.get(key);
 
 		List<StatsIndex.Entry> results = buildLeaderboard(server, statKey, stat);
 		return displayLeaderboard(ctx, results, getReadableName(key), verb, type, page, share);
@@ -490,7 +464,7 @@ public class StatsCommand implements ModInitializer {
 	/**
 	 * Executes a leaderboard lookup for custom stats.
 	 */
-	private int executeCustomTop(CommandContext<ServerCommandSource> ctx, Identifier statId, int page, boolean share) {
+	private int executeCustomTop(CommandContext<CommandSourceStack> ctx, Identifier statId, int page, boolean share) {
 		if (statsIndex == null) {
 			sendError(ctx, "Index not loaded yet.");
 			return 0;
@@ -503,8 +477,8 @@ public class StatsCommand implements ModInitializer {
 		}
 
 		MinecraftServer server = ctx.getSource().getServer();
-		String statKey = "minecraft:custom/" + statId;
-		Stat<Identifier> stat = Stats.CUSTOM.getOrCreateStat(registeredId);
+		String statKey = "minecraft:custom/" + registeredId;
+		Stat<Identifier> stat = Stats.CUSTOM.get(registeredId);
 
 		List<StatsIndex.Entry> results = buildLeaderboard(server, statKey, stat);
 		String readableName = getCustomStatReadableName(statId);
@@ -516,7 +490,7 @@ public class StatsCommand implements ModInitializer {
 
 	/**
 	 * Finds the exact Identifier object from the custom stat registry.
-	 * This is required because StatType.getOrCreateStat() uses object identity for
+	 * This is required because StatType.get() uses object identity for
 	 * registry lookups.
 	 */
 	private Identifier findRegisteredCustomStat(Identifier statId) {
@@ -540,9 +514,9 @@ public class StatsCommand implements ModInitializer {
 		}
 
 		// Merge with live stats from online players
-		for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
-			UUID uuid = player.getUuid();
-			int liveValue = player.getStatHandler().getStat(stat);
+		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+			UUID uuid = player.getUUID();
+			int liveValue = player.getStats().getValue(stat);
 
 			if (entryMap.containsKey(uuid)) {
 				entryMap.get(uuid).value = liveValue;
@@ -562,7 +536,7 @@ public class StatsCommand implements ModInitializer {
 	/**
 	 * Displays a paginated leaderboard.
 	 */
-	private <T> int displayLeaderboard(CommandContext<ServerCommandSource> ctx, List<StatsIndex.Entry> results,
+	private <T> int displayLeaderboard(CommandContext<CommandSourceStack> ctx, List<StatsIndex.Entry> results,
 			String itemName, String verb, StatType<T> type, int page, boolean share) {
 		int start = (page - 1) * PAGE_SIZE;
 		if (start >= results.size() || results.isEmpty()) {
@@ -576,7 +550,7 @@ public class StatsCommand implements ModInitializer {
 		// Send header
 		String header = formatTopHeader(verb, itemName, type, page);
 		if (share) {
-			broadcastAsPlayer(ctx, Text.literal(header));
+			broadcastAsPlayer(ctx, Component.literal(header));
 		} else {
 			sendWithShareButton(ctx, header);
 		}
@@ -589,11 +563,11 @@ public class StatsCommand implements ModInitializer {
 			int value = entry.value;
 			String name = getPlayerName(server, entry.uuid);
 
-			Text line = Text.literal(String.format("#%d %s: §a%,d", rank, name, value));
+			Component line = Component.literal(String.format("#%d %s: §a%,d", rank, name, value));
 			if (share) {
-				ctx.getSource().getServer().getPlayerManager().broadcast(line, false);
+				ctx.getSource().getServer().getPlayerList().broadcastSystemMessage(line, false);
 			} else {
-				ctx.getSource().sendFeedback(() -> line, false);
+				ctx.getSource().sendSuccess(() -> line, false);
 			}
 		}
 
@@ -604,7 +578,7 @@ public class StatsCommand implements ModInitializer {
 	 * Gets a player's display name (online name, cached name, or truncated UUID).
 	 */
 	private String getPlayerName(MinecraftServer server, UUID uuid) {
-		ServerPlayerEntity player = server.getPlayerManager().getPlayer(uuid);
+		ServerPlayer player = server.getPlayerList().getPlayer(uuid);
 		if (player != null) {
 			return player.getName().getString();
 		}
@@ -615,10 +589,10 @@ public class StatsCommand implements ModInitializer {
 	/**
 	 * Persists all stats for a player when they disconnect.
 	 */
-	private <T> void persistStats(StatType<T> statType, StatHandler statHandler, int playerId) {
+	private <T> void persistStats(StatType<T> statType, StatsCounter statHandler, int playerId) {
 		for (T key : statType.getRegistry()) {
-			Stat<T> stat = statType.getOrCreateStat(key);
-			int value = statHandler.getStat(stat);
+			Stat<T> stat = statType.get(key);
+			int value = statHandler.getValue(stat);
 			if (value > 0) {
 				String fullKey = getStatKey(stat);
 				int statId = statsIndex.getOrCreateStatId(fullKey);
@@ -688,7 +662,7 @@ public class StatsCommand implements ModInitializer {
 	/**
 	 * Displays a paginated leaderboard for custom stats with formatted values.
 	 */
-	private int displayCustomLeaderboard(CommandContext<ServerCommandSource> ctx, List<StatsIndex.Entry> results,
+	private int displayCustomLeaderboard(CommandContext<CommandSourceStack> ctx, List<StatsIndex.Entry> results,
 			String itemName, String statPath, int page, boolean share) {
 		int start = (page - 1) * PAGE_SIZE;
 		if (start >= results.size() || results.isEmpty()) {
@@ -701,9 +675,8 @@ public class StatsCommand implements ModInitializer {
 
 		// Send header
 		String header = String.format("--- Top %s (Page %d) ---", itemName, page);
-
 		if (share) {
-			broadcastAsPlayer(ctx, Text.literal(header));
+			broadcastAsPlayer(ctx, Component.literal(header));
 		} else {
 			sendWithShareButton(ctx, header);
 		}
@@ -716,52 +689,49 @@ public class StatsCommand implements ModInitializer {
 			String formattedValue = formatCustomStatValue(statPath, entry.value);
 			String name = getPlayerName(server, entry.uuid);
 
-			Text line = Text.literal(String.format("#%d %s: §a%s", rank, name, formattedValue));
+			Component line = Component.literal(String.format("#%d %s: §a%s", rank, name, formattedValue));
 			if (share) {
-				ctx.getSource().getServer().getPlayerManager().broadcast(line, false);
+				ctx.getSource().getServer().getPlayerList().broadcastSystemMessage(line, false);
 			} else {
-				ctx.getSource().sendFeedback(() -> line, false);
+				ctx.getSource().sendSuccess(() -> line, false);
 			}
 		}
 
 		return 1;
 	}
 
-	private void sendWithShareButton(CommandContext<ServerCommandSource> ctx, String message) {
-
-		String cmd = ctx.getInput();
-		if (!cmd.startsWith("/")) {
-			cmd = "/" + cmd;
+	private void sendWithShareButton(CommandContext<CommandSourceStack> ctx, String message) {
+		String command = ctx.getInput();
+		if (!command.startsWith("/")) {
+			command = "/" + command;
 		}
-		String shareCommand = cmd + " true";
 
-		Text shareButton = Text.literal(" [Share]")
-				.styled(style -> style
-						.withColor(Formatting.GREEN)
+		String shareCommand = command + " true";
+		Component shareButton = Component.literal(" [Share]")
+				.withStyle(style -> style
+						.withColor(ChatFormatting.GREEN)
 						.withClickEvent(new ClickEvent.RunCommand(shareCommand))
-						.withHoverEvent(
-								new HoverEvent.ShowText(Text.literal("Click to share in chat"))));
+						.withHoverEvent(new HoverEvent.ShowText(Component.literal("Click to share in chat"))));
 
-		ctx.getSource().sendFeedback(() -> Text.literal(message).append(shareButton), false);
+		ctx.getSource().sendSuccess(() -> Component.literal(message).append(shareButton), false);
 	}
 
-	private void broadcastAsPlayer(CommandContext<ServerCommandSource> ctx, Text message) {
-		String playerName = ctx.getSource().getName();
-		Text prefix = Text.literal("<" + playerName + "> ");
-		Text fullMessage = prefix.copy().append(message);
-		ctx.getSource().getServer().getPlayerManager().broadcast(fullMessage, false);
+	private void broadcastAsPlayer(CommandContext<CommandSourceStack> ctx, Component message) {
+		String playerName = ctx.getSource().getTextName();
+		Component fullMessage = Component.literal("<" + playerName + "> ").append(message);
+		ctx.getSource().getServer().getPlayerList().broadcastSystemMessage(fullMessage, false);
 	}
 
-	private void sendError(CommandContext<ServerCommandSource> ctx, String message) {
-		ctx.getSource().sendFeedback(() -> Text.literal("§c" + message), false);
+	private void sendError(CommandContext<CommandSourceStack> ctx, String message) {
+		ctx.getSource().sendFailure(Component.literal("§c" + message));
 	}
 
 	private <T> String formatStatMessage(String playerName, String verb, int value, String itemName, StatType<T> type) {
 		if (type == Stats.CUSTOM) {
 			return String.format("%s: §a%,d§r %s", playerName, value, itemName);
-		} else if (type == Stats.KILLED_BY) {
+		} else if (type == Stats.ENTITY_KILLED_BY) {
 			return String.format("%s was killed by §a%,d§r %s", playerName, value, itemName);
-		} else if (type == Stats.KILLED) {
+		} else if (type == Stats.ENTITY_KILLED) {
 			return String.format("%s has killed §a%,d§r %s", playerName, value, itemName);
 		} else {
 			return String.format("%s has %s §a%,d§r %s", playerName, verb, value, itemName);
@@ -771,9 +741,9 @@ public class StatsCommand implements ModInitializer {
 	private <T> String formatTopHeader(String verb, String itemName, StatType<T> type, int page) {
 		if (type == Stats.CUSTOM) {
 			return String.format("--- Top %s (Page %d) ---", itemName, page);
-		} else if (type == Stats.KILLED_BY) {
+		} else if (type == Stats.ENTITY_KILLED_BY) {
 			return String.format("--- Most Killed By %s (Page %d) ---", itemName, page);
-		} else if (type == Stats.KILLED) {
+		} else if (type == Stats.ENTITY_KILLED) {
 			return String.format("--- Most %s Killed (Page %d) ---", itemName, page);
 		} else {
 			String capitalizedVerb = verb.substring(0, 1).toUpperCase() + verb.substring(1);
@@ -784,7 +754,7 @@ public class StatsCommand implements ModInitializer {
 	// ==================== STAT KEY UTILITIES ====================
 
 	private <T> String getStatTypeId(StatType<T> type) {
-		Identifier id = Registries.STAT_TYPE.getId(type);
+		Identifier id = BuiltInRegistries.STAT_TYPE.getKey(type);
 		return id != null ? id.toString() : "minecraft:custom";
 	}
 
@@ -794,11 +764,11 @@ public class StatsCommand implements ModInitializer {
 
 	private <T> String getStatKeyString(T key) {
 		if (key instanceof Block block) {
-			return Registries.BLOCK.getId(block).toString();
+			return BuiltInRegistries.BLOCK.getKey(block).toString();
 		} else if (key instanceof Item item) {
-			return Registries.ITEM.getId(item).toString();
+			return BuiltInRegistries.ITEM.getKey(item).toString();
 		} else if (key instanceof EntityType<?> entityType) {
-			return Registries.ENTITY_TYPE.getId(entityType).toString();
+			return BuiltInRegistries.ENTITY_TYPE.getKey(entityType).toString();
 		} else if (key instanceof Identifier id) {
 			return id.toString();
 		}
@@ -809,9 +779,9 @@ public class StatsCommand implements ModInitializer {
 		if (key instanceof Block block) {
 			return block.getName().getString();
 		} else if (key instanceof Item item) {
-			return item.getName().getString();
+			return item.getName(item.getDefaultInstance()).getString();
 		} else if (key instanceof EntityType<?> entityType) {
-			return entityType.getName().getString();
+			return entityType.getDescription().getString();
 		} else if (key instanceof Identifier id) {
 			return id.getPath().replace("_", " ");
 		}

@@ -2,7 +2,7 @@ package hlvm.stats;
 
 import com.google.gson.stream.JsonReader;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.util.WorldSavePath;
+import net.minecraft.world.level.storage.LevelResource;
 
 import java.io.*;
 import java.nio.MappedByteBuffer;
@@ -39,7 +39,7 @@ public class StatsIndex {
     private final AtomicBoolean isSyncing = new AtomicBoolean(false);
 
     public StatsIndex(MinecraftServer server) {
-        this.indexDir = server.getSavePath(WorldSavePath.ROOT).resolve("stats_index");
+        this.indexDir = server.getWorldPath(LevelResource.ROOT).resolve("stats_index");
         try {
             Files.createDirectories(indexDir);
             loadMappings();
@@ -159,7 +159,7 @@ public class StatsIndex {
         new Thread(() -> {
             try {
                 System.out.println("[PlayerStats] Starting incremental stat indexing...");
-                File statsDir = server.getSavePath(WorldSavePath.STATS).toFile();
+                File statsDir = server.getWorldPath(LevelResource.PLAYER_STATS_DIR).toFile();
                 File[] files = statsDir.listFiles((dir, name) -> name.endsWith(".json"));
 
                 if (files == null) {
