@@ -5,7 +5,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.LevelResource;
 
 import java.io.*;
-import java.nio.MappedByteBuffer;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.util.*;
@@ -13,16 +13,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class StatsIndex {
-    // Initial size for the mapped file (128 MB)
-    // 30k players * 1000 stats * 4 bytes = ~120MB, so 128MB is a good start.
-    private static final int INITIAL_FILE_SIZE = 128 * 1024 * 1024;
-    private static final int GROW_SIZE = 64 * 1024 * 1024; // Grow by 64MB chunks
-    private static final int BYTES_PER_INT = 4;
+    private static final int RECORD_BYTES = Integer.BYTES * 3;
+    private static final long COMPACT_AT_BYTES = 1024L * 1024L * 1024L;
 
     private final Path indexDir;
     private final Map<UUID, Integer> playerIds = new ConcurrentHashMap<>();
     private final List<UUID> playerIdList = Collections.synchronizedList(new ArrayList<>());
     private final Map<String, Integer> statIds = new ConcurrentHashMap<>();
+    private final Map<Integer, Map<Integer, Integer>> statsByStat = new ConcurrentHashMap<>();
+    private final Map<Integer, List<Entry>> topCache = new ConcurrentHashMap<>();
 
     // Username cache: UUID -> last known username
     private final Map<UUID, String> playerNames = new ConcurrentHashMap<>();
@@ -31,11 +30,9 @@ public class StatsIndex {
     // Time
     private final Map<String, Long> lastIndexedTime = new ConcurrentHashMap<>();
 
-    private MappedByteBuffer mappedBuffer;
-    private FileChannel fileChannel;
-    private long currentFileSize;
-
-    private final Object resizeLock = new Object();
+    private DataOutputStream recordWriter;
+    private long recordFileSize;
+    private final Object ioLock = new Object();
     private final AtomicBoolean isSyncing = new AtomicBoolean(false);
 
     public StatsIndex(MinecraftServer server) {
@@ -44,29 +41,29 @@ public class StatsIndex {
             Files.createDirectories(indexDir);
             loadMappings();
             loadIncrementalCache();
-            initMappedFile();
+            initStorage();
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private void initMappedFile() throws IOException {
-        File dataFile = indexDir.resolve("data.bin").toFile();
-        this.currentFileSize = dataFile.exists() ? dataFile.length() : INITIAL_FILE_SIZE;
-        if (this.currentFileSize < INITIAL_FILE_SIZE) {
-            this.currentFileSize = INITIAL_FILE_SIZE;
+    private void initStorage() throws IOException {
+        Path v2File = indexDir.resolve("index.v2");
+        if (Files.exists(v2File)) {
+            loadV2(v2File);
+        } else {
+            migrateV1DataBin();
+            compact();
         }
 
-        // We keep the RandomAccessFile open implicitly via the FileChannel.
-        @SuppressWarnings("resource")
-        RandomAccessFile raf = new RandomAccessFile(dataFile, "rw");
-        raf.setLength(currentFileSize);
-        this.fileChannel = raf.getChannel();
-        this.mappedBuffer = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, currentFileSize);
+        if (recordWriter != null) {
+            recordWriter.close();
+        }
+        this.recordFileSize = Files.exists(v2File) ? Files.size(v2File) : 0;
+        this.recordWriter = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(v2File.toFile(), true)));
     }
 
-    // We will stick to a fixed large stride for row alignment to avoid complex file
-    // rewriting.
+    // Used only to read old data.bin databases.
     private static final int MAX_PLAYERS_CAPACITY = 100_000;
 
     // --- 1. MAPPING LOADING ---
@@ -141,6 +138,110 @@ public class StatsIndex {
         }
     }
 
+    private void loadV2(Path v2File) throws IOException {
+        try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(v2File.toFile())))) {
+            while (true) {
+                try {
+                    int statId = in.readInt();
+                    int playerId = in.readInt();
+                    int value = in.readInt();
+                    putInMemory(playerId, statId, value);
+                } catch (EOFException done) {
+                    return;
+                }
+            }
+        }
+    }
+
+    private void migrateV1DataBin() throws IOException {
+        Path dataFile = indexDir.resolve("data.bin");
+        if (!Files.exists(dataFile))
+            return;
+
+        long fileSize = Files.size(dataFile);
+        try (RandomAccessFile raf = new RandomAccessFile(dataFile.toFile(), "r");
+                FileChannel channel = raf.getChannel()) {
+            ByteBuffer row = ByteBuffer.allocate(playerIdList.size() * Integer.BYTES);
+            for (int statId = 0; statId < statIds.size(); statId++) {
+                long offset = (long) statId * MAX_PLAYERS_CAPACITY * Integer.BYTES;
+                if (offset >= fileSize)
+                    break;
+
+                row.clear();
+                int bytesToRead = (int) Math.min(row.capacity(), fileSize - offset);
+                row.limit(bytesToRead);
+                while (row.hasRemaining()) {
+                    if (channel.read(row, offset + row.position()) == -1) {
+                        break;
+                    }
+                }
+                row.flip();
+
+                for (int playerId = 0; playerId < playerIdList.size() && row.remaining() >= Integer.BYTES; playerId++) {
+                    int value = row.getInt();
+                    if (value > 0) {
+                        putInMemory(playerId, statId, value);
+                    }
+                }
+            }
+        }
+    }
+
+    private void putInMemory(int playerId, int statId, int value) {
+        if (playerId < 0 || playerId >= playerIdList.size())
+            return;
+
+        if (value > 0) {
+            statsByStat.computeIfAbsent(statId, ignored -> new ConcurrentHashMap<>()).put(playerId, value);
+        } else {
+            Map<Integer, Integer> byPlayer = statsByStat.get(statId);
+            if (byPlayer != null) {
+                byPlayer.remove(playerId);
+            }
+        }
+        topCache.remove(statId);
+    }
+
+    private void appendRecord(int playerId, int statId, int value) throws IOException {
+        if (recordFileSize > COMPACT_AT_BYTES) {
+            compact();
+        }
+        recordWriter.writeInt(statId);
+        recordWriter.writeInt(playerId);
+        recordWriter.writeInt(value);
+        recordFileSize += RECORD_BYTES;
+    }
+
+    private synchronized void compact() throws IOException {
+        Path v2File = indexDir.resolve("index.v2");
+        Path tmpFile = indexDir.resolve("index.v2.tmp");
+
+        if (recordWriter != null) {
+            recordWriter.close();
+            recordWriter = null;
+        }
+
+        try (DataOutputStream out = new DataOutputStream(
+                new BufferedOutputStream(new FileOutputStream(tmpFile.toFile())))) {
+            for (Map.Entry<Integer, Map<Integer, Integer>> statEntry : statsByStat.entrySet()) {
+                int statId = statEntry.getKey();
+                for (Map.Entry<Integer, Integer> playerEntry : statEntry.getValue().entrySet()) {
+                    out.writeInt(statId);
+                    out.writeInt(playerEntry.getKey());
+                    out.writeInt(playerEntry.getValue());
+                }
+            }
+        }
+
+        try {
+            Files.move(tmpFile, v2File, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(tmpFile, v2File, StandardCopyOption.REPLACE_EXISTING);
+        }
+        recordFileSize = Files.size(v2File);
+        recordWriter = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(v2File.toFile(), true)));
+    }
+
     private void saveIncrementalCache() {
         try (PrintWriter out = new PrintWriter(new FileWriter(indexDir.resolve("incremental.cache").toFile()))) {
             for (Map.Entry<String, Long> entry : lastIndexedTime.entrySet()) {
@@ -209,6 +310,9 @@ public class StatsIndex {
 
                 // Final save
                 saveIncrementalCache();
+                synchronized (ioLock) {
+                    compact();
+                }
 
                 System.out.println(
                         "[PlayerStats] Indexing complete! Processed " + count + ", Skipped " + skipped + " players.");
@@ -313,75 +417,33 @@ public class StatsIndex {
 
     // --- 4. BINARY WRITING --
     public void updateStat(int playerId, int statId, int value) {
-        if (playerId == -1 || playerId >= MAX_PLAYERS_CAPACITY)
+        if (playerId == -1 || playerId >= playerIdList.size())
             return;
 
-        // Ensure file is large enough
-        ensureFileSize(statId, playerId);
-
-        long offset = ((long) statId * MAX_PLAYERS_CAPACITY + playerId) * BYTES_PER_INT;
-
-        try {
-            // MappedByteBuffer is thread-safe for individual putInt at different storage
-            // but we should be careful if we are resizing.
-            // Since we are just putting an int, it's atomic enough for stats.
-            mappedBuffer.putInt((int) offset, value);
-        } catch (IndexOutOfBoundsException e) {
-            // Should be caught by ensureFileSize, but just in case
-            synchronized (resizeLock) {
-                ensureFileSize(statId, playerId);
-                mappedBuffer.putInt((int) offset, value);
-            }
-        }
-    }
-
-    // Check if the file needs to grow to accommodate this statId
-    private void ensureFileSize(int statId, int playerId) {
-        long requiredPos = ((long) statId * MAX_PLAYERS_CAPACITY + playerId + 1) * BYTES_PER_INT;
-
-        if (requiredPos > currentFileSize) {
-            synchronized (resizeLock) {
-                if (requiredPos > currentFileSize) {
-                    try {
-                        long newSize = Math.max(requiredPos + GROW_SIZE, currentFileSize + GROW_SIZE);
-
-                        mappedBuffer.force(); // Flush old
-
-                        // Close old channel to release FD
-                        if (this.fileChannel != null) {
-                            try {
-                                this.fileChannel.close();
-                            } catch (IOException ignored) {
-                            }
-                        }
-
-                        @SuppressWarnings("resource")
-                        RandomAccessFile raf = new RandomAccessFile(indexDir.resolve("data.bin").toFile(), "rw");
-                        raf.setLength(newSize);
-                        this.fileChannel = raf.getChannel();
-
-                        // Create NEW map
-                        this.mappedBuffer = this.fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, newSize);
-                        this.currentFileSize = newSize;
-
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                }
+        synchronized (ioLock) {
+            putInMemory(playerId, statId, value);
+            try {
+                appendRecord(playerId, statId, value);
+            } catch (IOException e) {
+                e.printStackTrace();
             }
         }
     }
 
     public void close() {
-        try {
-            if (mappedBuffer != null) {
-                mappedBuffer.force();
+        synchronized (ioLock) {
+            try {
+                if (recordWriter != null) {
+                    recordWriter.flush();
+                }
+                compact();
+                if (recordWriter != null) {
+                    recordWriter.close();
+                    recordWriter = null;
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
             }
-            if (fileChannel != null) {
-                fileChannel.close();
-            }
-        } catch (IOException e) {
-            e.printStackTrace();
         }
     }
 
@@ -390,26 +452,7 @@ public class StatsIndex {
         if (!statIds.containsKey(statKey))
             return Collections.emptyList();
         int statId = statIds.get(statKey);
-
-        long startOffset = (long) statId * MAX_PLAYERS_CAPACITY * BYTES_PER_INT;
-        List<Entry> allEntries = new ArrayList<>();
-
-        // Ensure we don't read past file even if valid statId (rare)
-        if (startOffset >= currentFileSize) {
-            return Collections.emptyList();
-        }
-
-        // We can just iterate the buffer
-        // For 30k (or 100k) players, checking them all is fast in memory (sub 1ms).
-        for (int pId = 0; pId < playerIdList.size(); pId++) {
-            long offset = startOffset + ((long) pId * BYTES_PER_INT);
-            int val = mappedBuffer.getInt((int) offset);
-            if (val > 0) {
-                allEntries.add(new Entry(playerIdList.get(pId), val));
-            }
-        }
-
-        allEntries.sort((e1, e2) -> Integer.compare(e2.value, e1.value));
+        List<Entry> allEntries = topCache.computeIfAbsent(statId, this::buildTop);
 
         int start = (page - 1) * pageSize;
         if (start >= allEntries.size())
@@ -427,13 +470,25 @@ public class StatsIndex {
         int playerId = playerIds.get(playerUuid);
         int statId = statIds.get(statKey);
 
-        long offset = ((long) statId * MAX_PLAYERS_CAPACITY + playerId) * BYTES_PER_INT;
+        Map<Integer, Integer> byPlayer = statsByStat.get(statId);
+        return byPlayer == null ? 0 : byPlayer.getOrDefault(playerId, 0);
+    }
 
-        if (offset + BYTES_PER_INT > currentFileSize) {
-            return 0;
+    private List<Entry> buildTop(int statId) {
+        Map<Integer, Integer> byPlayer = statsByStat.get(statId);
+        if (byPlayer == null || byPlayer.isEmpty()) {
+            return Collections.emptyList();
         }
 
-        return mappedBuffer.getInt((int) offset);
+        List<Entry> allEntries = new ArrayList<>();
+        for (Map.Entry<Integer, Integer> entry : byPlayer.entrySet()) {
+            int playerId = entry.getKey();
+            if (playerId >= 0 && playerId < playerIdList.size()) {
+                allEntries.add(new Entry(playerIdList.get(playerId), entry.getValue()));
+            }
+        }
+        allEntries.sort((e1, e2) -> Integer.compare(e2.value, e1.value));
+        return allEntries;
     }
 
     public static class Entry {
