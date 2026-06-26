@@ -1,7 +1,9 @@
 package hlvm.stats;
 
 import com.google.gson.stream.JsonReader;
+import com.mojang.authlib.GameProfile;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.players.NameAndId;
 import net.minecraft.world.level.storage.LevelResource;
 
 import java.io.*;
@@ -25,6 +27,7 @@ public class StatsIndex {
 
     // Username cache: UUID -> last known username
     private final Map<UUID, String> playerNames = new ConcurrentHashMap<>();
+    private boolean namesDirty = false;
 
     // File modification times for incremental indexing: Filename -> Last Modified
     // Time
@@ -275,19 +278,19 @@ public class StatsIndex {
                     try {
                         String filename = file.getName();
                         long lastMod = file.lastModified();
-
-                        // Check if we need to update this file
-                        if (lastIndexedTime.containsKey(filename) && lastIndexedTime.get(filename) >= lastMod) {
-                            skipped++;
-                            continue;
-                        }
-
                         String uuidStr = filename.replace(".json", "");
                         UUID uuid = UUID.fromString(uuidStr);
 
                         int pid = getOrCreatePlayerId(uuid);
                         if (pid == -1) {
                             System.err.println("[PlayerStats] Max players reached! Cannot index " + uuidStr);
+                            continue;
+                        }
+                        resolveAndCachePlayerName(server, uuid);
+
+                        // Check if we need to update this file
+                        if (lastIndexedTime.containsKey(filename) && lastIndexedTime.get(filename) >= lastMod) {
+                            skipped++;
                             continue;
                         }
 
@@ -310,6 +313,7 @@ public class StatsIndex {
 
                 // Final save
                 saveIncrementalCache();
+                saveNamesCacheIfDirty();
                 synchronized (ioLock) {
                     compact();
                 }
@@ -380,15 +384,54 @@ public class StatsIndex {
 
     // --- USERNAME CACHE ---
     public void cachePlayerName(UUID uuid, String name) {
+        cachePlayerName(uuid, name, true);
+    }
+
+    private synchronized void cachePlayerName(UUID uuid, String name, boolean saveNow) {
         String oldName = playerNames.get(uuid);
         if (!name.equals(oldName)) {
             playerNames.put(uuid, name);
-            saveNamesCache();
+            namesDirty = true;
+            if (saveNow) {
+                saveNamesCacheIfDirty();
+            }
         }
     }
 
     public String getCachedName(UUID uuid) {
         return playerNames.get(uuid);
+    }
+
+    private void resolveAndCachePlayerName(MinecraftServer server, UUID uuid) {
+        if (playerNames.containsKey(uuid))
+            return;
+
+        var onlinePlayer = server.getPlayerList().getPlayer(uuid);
+        if (onlinePlayer != null) {
+            cachePlayerName(uuid, onlinePlayer.getName().getString(), false);
+            return;
+        }
+
+        Optional<NameAndId> cached = server.services().nameToIdCache().get(uuid);
+        if (cached.isPresent()) {
+            cachePlayerName(uuid, cached.get().name(), false);
+            return;
+        }
+
+        try {
+            Optional<GameProfile> fetched = server.services().profileResolver().fetchById(uuid);
+            fetched.ifPresent(profile -> cachePlayerName(uuid, profile.name(), false));
+        } catch (Exception e) {
+            // Name lookup is best-effort; stats must still index when Mojang services are unavailable.
+        }
+    }
+
+    private synchronized void saveNamesCacheIfDirty() {
+        if (!namesDirty)
+            return;
+
+        saveNamesCache();
+        namesDirty = false;
     }
 
     private synchronized void saveNamesCache() {
