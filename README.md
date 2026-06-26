@@ -1,4 +1,6 @@
-# Stats Command
+# 📊 Stats Command
+
+[![Modrinth Downloads](https://img.shields.io/modrinth/dt/stats-command?logo=modrinth&label=Modrinth%20downloads)](https://modrinth.com/mod/stats-command)
 
 A simple Fabric mod that provides player statistics and leaderboards in one command.
 
