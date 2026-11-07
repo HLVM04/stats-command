@@ -96,6 +96,53 @@ Item and block stats are tracked per item or block. Use the same category with a
 
 Minecraft's built-in stat keys are documented on the [Minecraft Wiki statistics page](https://minecraft.wiki/w/Statistics).
 
+## Old world stats
+
+The mod can show the stats of a previous world next to the current ones.
+
+**Setup**
+
+1. Copy the old world's `players/stats/*.json` files into `config/stats-command/old-world/stats/` on the server (the folder is created on first start).
+2. Restart the server. The log prints `Old world stats loaded: N players`.
+
+Nothing is written to the old world data and the regular index is not touched; old stats are read into memory at start.
+
+**Players**
+
+- Java players keep the same UUID in both worlds (offline mode), so nothing else is needed.
+- Bedrock (Floodgate) players are matched by name: their old Floodgate UUID is translated to the offline UUID of their name (for example `.Steve`), which is what EasyAuth's `forced-offline-uuid` produces. Names are read from the server's `usercache.json`; you can also drop the old world's `usercache.json` next to the stats folder (`config/stats-command/old-world/usercache.json`).
+- Anything that cannot be matched can be set by hand in `config/stats-command/old-world/uuid-map.json`, mapping an old UUID to a new UUID or to a player name:
+  ```json
+  {
+    "00000000-0000-0000-0009-0123456789ab": ".SomeBedrockPlayer"
+  }
+  ```
+  Players whose name cannot be found are listed in the server log and ignored.
+
+**Modes**
+
+Add one of these words at the end of any `/stats` command (after the page and the optional `true`, or in place of `true`):
+
+| Mode | Shows |
+|------|-------|
+| `both` (default) | the current world, with the old world's value in parentheses |
+| `current` | the current world only |
+| `old` | the old world only |
+| `total` | both worlds added together |
+
+```
+/stats top crafted minecraft:chest
+--- Most Chest Crafted (Old world) (Page 1) ---
+#1 marcel_mrm: 1,824 (3,243)
+#2 Eddd64: 631 (0)
+
+/stats top crafted minecraft:chest 2 total
+/stats top custom minecraft:play_time old
+/stats Steve mined minecraft:stone total
+```
+
+`both` ranks by the current world. `old` and `total` also include players that only played in the old world. Without old world data, `both` behaves exactly like `current`.
+
 ## Installation
 
 Requires Fabric Loader and Fabric API. Place the mod `.jar` file in your server's `mods` folder.
